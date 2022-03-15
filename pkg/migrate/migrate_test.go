@@ -716,7 +716,7 @@ func TestGetPVCs(t *testing.T) {
 			req := require.New(t)
 			clientset := fake.NewSimpleClientset(test.resources...)
 			testlog := log.New(testWriter{t: t}, "", 0)
-			originalPVCs, nses, err := getPVCs(context.Background(), testlog, clientset, test.sourceScName, test.destScName)
+			originalPVCs, nses, err := getPVCs(context.Background(), testlog, clientset, test.sourceScName, test.destScName, "", "")
 			if !test.wantErr {
 				req.NoError(err)
 			} else {

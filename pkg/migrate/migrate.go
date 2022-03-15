@@ -39,6 +39,8 @@ const pvMigrateContainerName = "pvmigrate"
 type Options struct {
 	SourceSCName         string
 	DestSCName           string
+	Namespace            string
+	PVCName              string
 	RsyncImage           string
 	SetDefaults          bool
 	VerboseCopy          bool
@@ -51,6 +53,8 @@ func Cli() {
 
 	flag.StringVar(&options.SourceSCName, "source-sc", "", "storage provider name to migrate from")
 	flag.StringVar(&options.DestSCName, "dest-sc", "", "storage provider name to migrate to")
+	flag.StringVar(&options.Namespace, "namespace", "default", "the namespace whose PVC's you want to migrate")
+	flag.StringVar(&options.PVCName, "pvc-name", "", "the PVC to migrate its StorageClass")
 	flag.StringVar(&options.RsyncImage, "rsync-image", "eeacms/rsync:2.3", "the image to use to copy PVCs - must have 'rsync' on the path")
 	flag.BoolVar(&options.SetDefaults, "set-defaults", false, "change default storage class from source to dest")
 	flag.BoolVar(&options.VerboseCopy, "verbose-copy", false, "show output from the rsync command used to copy data between PVCs")
@@ -87,7 +91,7 @@ func Migrate(ctx context.Context, w *log.Logger, clientset k8sclient.Interface, 
 		return err
 	}
 
-	matchingPVCs, namespaces, err := getPVCs(ctx, w, clientset, options.SourceSCName, options.DestSCName)
+	matchingPVCs, namespaces, err := getPVCs(ctx, w, clientset, options.SourceSCName, options.DestSCName, options.Namespace, options.PVCName)
 	if err != nil {
 		return err
 	}
@@ -379,7 +383,7 @@ func createMigrationPod(ctx context.Context, clientset k8sclient.Interface, ns s
 // a map of namespaces to arrays of original PVCs
 // an array of namespaces that the PVCs were found within
 // an error, if one was encountered
-func getPVCs(ctx context.Context, w *log.Logger, clientset k8sclient.Interface, sourceSCName, destSCName string) (map[string][]corev1.PersistentVolumeClaim, []string, error) {
+func getPVCs(ctx context.Context, w *log.Logger, clientset k8sclient.Interface, sourceSCName, destSCName, namespace, pvcName string) (map[string][]corev1.PersistentVolumeClaim, []string, error) {
 	// get PVs using the specified storage provider
 	pvs, err := clientset.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -387,10 +391,27 @@ func getPVCs(ctx context.Context, w *log.Logger, clientset k8sclient.Interface, 
 	}
 	matchingPVs := []corev1.PersistentVolume{}
 	pvsByName := map[string]corev1.PersistentVolume{}
+	w.Printf("Namespace: %s, PVCName: %s", namespace, pvcName)
 	for _, pv := range pvs.Items {
 		if pv.Spec.StorageClassName == sourceSCName {
-			matchingPVs = append(matchingPVs, pv)
-			pvsByName[pv.Name] = pv
+			if pvcName != "" {
+				if pv.Spec.ClaimRef.Name == pvcName && pv.Spec.ClaimRef.Namespace == namespace {
+					matchingPVs = append(matchingPVs, pv)
+					pvsByName[pv.Name] = pv
+				} else {
+					w.Printf("PV %s claim's does not match name %s and namespace %s", pv.Name, pvcName, namespace)
+				}
+			} else if namespace != "" {
+				if pv.Spec.ClaimRef.Namespace == namespace {
+					matchingPVs = append(matchingPVs, pv)
+					pvsByName[pv.Name] = pv
+				} else {
+					w.Printf("PV %s claim's does not match namespace %s", pv.Name, namespace)
+				}
+			} else {
+				matchingPVs = append(matchingPVs, pv)
+				pvsByName[pv.Name] = pv
+			}
 		} else {
 			w.Printf("PV %s does not match source SC %s, not migrating\n", pv.Name, sourceSCName)
 		}
