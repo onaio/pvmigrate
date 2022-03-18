@@ -738,6 +738,7 @@ func Test_createMigrationPod(t *testing.T) {
 		sourcePvcName string
 		destPvcName   string
 		rsyncImage    string
+		rsyncAddtOpts string
 	}
 	tests := []struct {
 		name    string
@@ -752,6 +753,7 @@ func Test_createMigrationPod(t *testing.T) {
 				sourcePvcName: "sourcepvc",
 				destPvcName:   "destpvc",
 				rsyncImage:    "imagename",
+				rsyncAddtOpts: "",
 			},
 			want: &corev1.Pod{
 				TypeMeta: metav1.TypeMeta{
@@ -822,7 +824,7 @@ func Test_createMigrationPod(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			req := require.New(t)
 			clientset := fake.NewSimpleClientset()
-			got, err := createMigrationPod(context.Background(), clientset, tt.args.ns, tt.args.sourcePvcName, tt.args.destPvcName, tt.args.rsyncImage)
+			got, err := createMigrationPod(context.Background(), clientset, tt.args.ns, tt.args.sourcePvcName, tt.args.destPvcName, tt.args.rsyncImage, tt.args.rsyncAddtOpts)
 			if tt.wantErr {
 				req.Error(err)
 				return

@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -37,14 +38,15 @@ const pvMigrateContainerName = "pvmigrate"
 
 // Options is the set of options that should be provided to Migrate
 type Options struct {
-	SourceSCName         string
-	DestSCName           string
-	Namespace            string
-	PVCName              string
-	RsyncImage           string
-	SetDefaults          bool
-	VerboseCopy          bool
-	SkipSourceValidation bool
+	SourceSCName           string
+	DestSCName             string
+	Namespace              string
+	PVCName                string
+	RsyncImage             string
+	RsyncAdditionalOptions string
+	SetDefaults            bool
+	VerboseCopy            bool
+	SkipSourceValidation   bool
 }
 
 // Cli uses CLI options to run Migrate
@@ -56,6 +58,7 @@ func Cli() {
 	flag.StringVar(&options.Namespace, "namespace", "default", "the namespace whose PVC's you want to migrate")
 	flag.StringVar(&options.PVCName, "pvc-name", "", "the PVC to migrate its StorageClass")
 	flag.StringVar(&options.RsyncImage, "rsync-image", "eeacms/rsync:2.3", "the image to use to copy PVCs - must have 'rsync' on the path")
+	flag.StringVar(&options.RsyncAdditionalOptions, "rsync-additional-options", "", "additional options to pass to rsync command")
 	flag.BoolVar(&options.SetDefaults, "set-defaults", false, "change default storage class from source to dest")
 	flag.BoolVar(&options.VerboseCopy, "verbose-copy", false, "show output from the rsync command used to copy data between PVCs")
 	flag.BoolVar(&options.SkipSourceValidation, "skip-source-validation", false, "migrate from PVCs using a particular StorageClass name, even if that StorageClass does not exist")
@@ -101,7 +104,7 @@ func Migrate(ctx context.Context, w *log.Logger, clientset k8sclient.Interface, 
 		return fmt.Errorf("failed to scale down pods: %w", err)
 	}
 
-	err = copyAllPVCs(ctx, w, clientset, options.SourceSCName, options.DestSCName, options.RsyncImage, matchingPVCs, options.VerboseCopy)
+	err = copyAllPVCs(ctx, w, clientset, options.SourceSCName, options.DestSCName, options.RsyncImage, options.RsyncAdditionalOptions, matchingPVCs, options.VerboseCopy)
 	if err != nil {
 		return err
 	}
@@ -198,7 +201,7 @@ func swapDefaultStorageClasses(ctx context.Context, w *log.Logger, clientset k8s
 	return nil
 }
 
-func copyAllPVCs(ctx context.Context, w *log.Logger, clientset k8sclient.Interface, sourceSCName string, destSCName string, rsyncImage string, matchingPVCs map[string][]corev1.PersistentVolumeClaim, verboseCopy bool) error {
+func copyAllPVCs(ctx context.Context, w *log.Logger, clientset k8sclient.Interface, sourceSCName string, destSCName string, rsyncImage string, rsyncAddtOpts string, matchingPVCs map[string][]corev1.PersistentVolumeClaim, verboseCopy bool) error {
 	// create a pod for each PVC migration, and wait for it to finish
 	w.Printf("\nCopying data from %s PVCs to %s PVCs\n", sourceSCName, destSCName)
 	for ns, nsPvcs := range matchingPVCs {
@@ -206,7 +209,7 @@ func copyAllPVCs(ctx context.Context, w *log.Logger, clientset k8sclient.Interfa
 			sourcePvcName, destPvcName := nsPvc.Name, newPvcName(nsPvc.Name)
 			w.Printf("Copying data from %s (%s) to %s in %s\n", sourcePvcName, nsPvc.Spec.VolumeName, destPvcName, ns)
 
-			err := copyOnePVC(ctx, w, clientset, ns, sourcePvcName, destPvcName, rsyncImage, verboseCopy)
+			err := copyOnePVC(ctx, w, clientset, ns, sourcePvcName, destPvcName, rsyncImage, rsyncAddtOpts, verboseCopy)
 			if err != nil {
 				return fmt.Errorf("failed to copy PVC %s in %s: %w", nsPvc.Name, ns, err)
 			}
@@ -215,8 +218,8 @@ func copyAllPVCs(ctx context.Context, w *log.Logger, clientset k8sclient.Interfa
 	return nil
 }
 
-func copyOnePVC(ctx context.Context, w *log.Logger, clientset k8sclient.Interface, ns string, sourcePvcName string, destPvcName string, rsyncImage string, verboseCopy bool) error {
-	createdPod, err := createMigrationPod(ctx, clientset, ns, sourcePvcName, destPvcName, rsyncImage)
+func copyOnePVC(ctx context.Context, w *log.Logger, clientset k8sclient.Interface, ns string, sourcePvcName string, destPvcName string, rsyncImage string, rsyncAddtOpts string, verboseCopy bool) error {
+	createdPod, err := createMigrationPod(ctx, clientset, ns, sourcePvcName, destPvcName, rsyncImage, rsyncAddtOpts)
 	if err != nil {
 		return err
 	}
@@ -309,7 +312,16 @@ func copyOnePVC(ctx context.Context, w *log.Logger, clientset k8sclient.Interfac
 	return nil
 }
 
-func createMigrationPod(ctx context.Context, clientset k8sclient.Interface, ns string, sourcePvcName string, destPvcName string, rsyncImage string) (*corev1.Pod, error) {
+func createMigrationPod(ctx context.Context, clientset k8sclient.Interface, ns string, sourcePvcName string, destPvcName string, rsyncImage string, rsyncAddtOpts string) (*corev1.Pod, error) {
+	containerArgs := []string{
+		"-a",       // use the "archive" method to copy files recursively with permissions/ownership/etc
+		"-v",       // show verbose output
+		"-P",       // show progress, and resume aborted/partial transfers
+		"--delete", // delete files in dest that are not in source
+	}
+	containerArgs = append(containerArgs, strings.Fields(rsyncAddtOpts)...)
+	containerArgs = append(containerArgs, []string{"/source/", "/dest"}...)
+
 	createdPod, err := clientset.CoreV1().Pods(ns).Create(ctx, &corev1.Pod{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Pod",
@@ -349,14 +361,7 @@ func createMigrationPod(ctx context.Context, clientset k8sclient.Interface, ns s
 					Command: []string{
 						"rsync",
 					},
-					Args: []string{
-						"-a",       // use the "archive" method to copy files recursively with permissions/ownership/etc
-						"-v",       // show verbose output
-						"-P",       // show progress, and resume aborted/partial transfers
-						"--delete", // delete files in dest that are not in source
-						"/source/",
-						"/dest",
-					},
+					Args: containerArgs,
 					VolumeMounts: []corev1.VolumeMount{
 						{
 							MountPath: "/source",
